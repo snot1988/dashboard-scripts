@@ -1,0 +1,1234 @@
+<script>
+/* ==========================================================================
+   MEGA - NEW CONVERSATION CTA
+   Exibe um aviso no topo da conversa quando o contato já possui outra
+   conversa recente aberta em outro canal. O aviso mostra canal, status e
+   data e oferece uma CTA para navegar direto para a conversa anterior,
+   evitando atendimentos duplicados. Também permite resolver a conversa
+   atual sem enviar pesquisa CSAT (via etiqueta configurada em NO_SURVEY_LABEL).
+
+   Instalação: Super Admin → Dashboard Apps → adicione como Custom Script.
+   Configuração: ajuste NO_SURVEY_LABEL se o nome da etiqueta for diferente,
+   e DENYLIST_ACCOUNTS para excluir accounts específicas.
+   ========================================================================== */
+(function () {
+  "use strict";
+
+  const LOG_PREFIX = "[new-conversation-cta]";
+  const DEBUG = true;
+  const STYLE_ID = "new-conversation-cta-style";
+  const CTA_ID = "new-conversation-cta";
+  const LATEST_CONVERSATION_NOTICE_ID = "latest-contact-conversation-notice";
+  const CTA_BUSY_CLASS = "is-busy";
+  const HIDDEN_REPLY_CLASS = "new-conversation-cta-hidden-reply";
+  const HIDDEN_REPLY_ATTR = "data-new-conversation-cta-hidden";
+  const HIDDEN_REPLY_STYLE_ATTR = "data-new-conversation-cta-display";
+  const NO_SURVEY_LABEL = "nao_enviar_pesquisa";
+  // Status pode mudar por acao do agente (resolver/reabrir); mantemos curto
+  // para nao deixar a CTA inconsistente. Invalidacoes pontuais ocorrem em
+  // rememberResolvedStatus.
+  const STATUS_CACHE_TTL_MS = 15000;
+  // contactId/inboxId/createdAtMs sao essencialmente imutaveis; podemos
+  // segurar bem mais tempo. O status armazenado aqui tem fallback no store.
+  const CONVERSATION_META_CACHE_TTL_MS = 60000;
+  // Lista de conversas do contato muda pouco; 30s reduz trafego mantendo
+  // deteccao razoavel de uma conversa criada em outro canal.
+  const CONTACT_CONVERSATIONS_CACHE_TTL_MS = 30000;
+  const AUTO_RESOLVE_ATTEMPT_TTL_MS = 15000;
+  const NAVIGATION_WAIT_MS = 3500;
+  const DENYLIST_ACCOUNTS = new Set([]);
+
+  if (document.getElementById(STYLE_ID)) return;
+
+  const style = document.createElement("style");
+  style.id = STYLE_ID;
+  style.textContent = `
+    .${HIDDEN_REPLY_CLASS} {
+      display: none !important;
+    }
+
+    #${LATEST_CONVERSATION_NOTICE_ID} {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 18px;
+      margin: 10px 12px 0;
+      border-radius: 14px;
+      border: 1px solid rgba(15, 23, 42, 0.08);
+      background: linear-gradient(135deg, rgba(59, 130, 246, 0.08), rgba(16, 185, 129, 0.08));
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
+    }
+
+    #${LATEST_CONVERSATION_NOTICE_ID} .latest-conversation-notice-copy {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    #${LATEST_CONVERSATION_NOTICE_ID} .latest-conversation-notice-title {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 700;
+      color: #0f172a;
+    }
+
+    #${LATEST_CONVERSATION_NOTICE_ID} .latest-conversation-notice-text {
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.45;
+      color: #334155;
+    }
+
+    #${LATEST_CONVERSATION_NOTICE_ID} .latest-conversation-notice-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    #${LATEST_CONVERSATION_NOTICE_ID} .latest-conversation-notice-badge,
+    #${LATEST_CONVERSATION_NOTICE_ID} .latest-conversation-notice-detail {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 0 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    #${LATEST_CONVERSATION_NOTICE_ID} .latest-conversation-notice-detail {
+      background: rgba(148, 163, 184, 0.14);
+      color: #334155;
+      font-weight: 600;
+    }
+
+    #${LATEST_CONVERSATION_NOTICE_ID} .latest-conversation-notice-badge {
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    #${LATEST_CONVERSATION_NOTICE_ID} .latest-conversation-notice-badge.is-open {
+      background: rgba(34, 197, 94, 0.16);
+      color: #166534;
+    }
+
+    #${LATEST_CONVERSATION_NOTICE_ID} .latest-conversation-notice-badge.is-pending {
+      background: rgba(245, 158, 11, 0.16);
+      color: #92400e;
+    }
+
+    #${LATEST_CONVERSATION_NOTICE_ID} .latest-conversation-notice-badge.is-resolved {
+      background: rgba(59, 130, 246, 0.16);
+      color: #1d4ed8;
+    }
+
+    #${LATEST_CONVERSATION_NOTICE_ID} .latest-conversation-notice-link {
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 190px;
+      height: 40px;
+      padding: 0 16px;
+      border-radius: 10px;
+      text-decoration: none;
+      background: linear-gradient(135deg, #2563eb, #0f766e);
+      color: #f8fafc;
+      font-size: 13px;
+      font-weight: 700;
+      transition: transform 0.12s ease-out, filter 0.12s ease-out;
+    }
+
+    #${LATEST_CONVERSATION_NOTICE_ID} .latest-conversation-notice-link:hover {
+      filter: brightness(1.08);
+    }
+
+    #${LATEST_CONVERSATION_NOTICE_ID} .latest-conversation-notice-link:active {
+      transform: scale(0.98);
+    }
+
+    #${CTA_ID} {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 16px 18px;
+      margin: 10px 12px 12px;
+      border-radius: 14px;
+      border: 1px solid rgba(15, 23, 42, 0.08);
+      background: linear-gradient(135deg, rgba(14, 116, 144, 0.08), rgba(34, 197, 94, 0.08));
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+    }
+
+    #${CTA_ID} .new-conversation-cta-copy {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    #${CTA_ID} .new-conversation-cta-title {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 700;
+      color: #0f172a;
+    }
+
+    #${CTA_ID} .new-conversation-cta-text {
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.45;
+      color: #334155;
+    }
+
+    #${CTA_ID} .new-conversation-cta-button {
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-width: 170px;
+      height: 40px;
+      padding: 0 16px;
+      border: 0;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #0f766e, #0891b2);
+      color: #f8fafc;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform 0.12s ease-out, filter 0.12s ease-out, opacity 0.12s ease-out;
+    }
+
+    #${CTA_ID} .new-conversation-cta-button:hover {
+      filter: brightness(1.08);
+    }
+
+    #${CTA_ID} .new-conversation-cta-button:active {
+      transform: scale(0.98);
+    }
+
+    #${CTA_ID} .new-conversation-cta-button:disabled {
+      cursor: default;
+      opacity: 0.7;
+    }
+
+    #${CTA_ID} .new-conversation-cta-spinner {
+      display: none;
+      width: 14px;
+      height: 14px;
+      border: 2px solid currentColor;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: new-conversation-cta-spin 0.7s linear infinite;
+    }
+
+    #${CTA_ID}.${CTA_BUSY_CLASS} .new-conversation-cta-spinner {
+      display: inline-block;
+    }
+
+    #${CTA_ID}.${CTA_BUSY_CLASS} .new-conversation-cta-label {
+      opacity: 0.92;
+    }
+
+    .dark #${CTA_ID} {
+      border-color: rgba(148, 163, 184, 0.16);
+      background: linear-gradient(135deg, rgba(6, 182, 212, 0.12), rgba(16, 185, 129, 0.1));
+      box-shadow: 0 12px 32px rgba(2, 6, 23, 0.22);
+    }
+
+    .dark #${LATEST_CONVERSATION_NOTICE_ID} {
+      border-color: rgba(148, 163, 184, 0.16);
+      background: linear-gradient(135deg, rgba(37, 99, 235, 0.18), rgba(13, 148, 136, 0.16));
+      box-shadow: 0 12px 32px rgba(2, 6, 23, 0.2);
+    }
+
+    .dark #${CTA_ID} .new-conversation-cta-title {
+      color: #e2e8f0;
+    }
+
+    .dark #${LATEST_CONVERSATION_NOTICE_ID} .latest-conversation-notice-title {
+      color: #e2e8f0;
+    }
+
+    .dark #${CTA_ID} .new-conversation-cta-text {
+      color: #cbd5e1;
+    }
+
+    .dark #${LATEST_CONVERSATION_NOTICE_ID} .latest-conversation-notice-text {
+      color: #cbd5e1;
+    }
+
+    .dark #${LATEST_CONVERSATION_NOTICE_ID} .latest-conversation-notice-detail {
+      background: rgba(148, 163, 184, 0.14);
+      color: #e2e8f0;
+    }
+
+    .dark #${LATEST_CONVERSATION_NOTICE_ID} .latest-conversation-notice-badge.is-open {
+      background: rgba(74, 222, 128, 0.18);
+      color: #bbf7d0;
+    }
+
+    .dark #${LATEST_CONVERSATION_NOTICE_ID} .latest-conversation-notice-badge.is-pending {
+      background: rgba(251, 191, 36, 0.18);
+      color: #fde68a;
+    }
+
+    .dark #${LATEST_CONVERSATION_NOTICE_ID} .latest-conversation-notice-badge.is-resolved {
+      background: rgba(96, 165, 250, 0.18);
+      color: #bfdbfe;
+    }
+
+    @media (max-width: 700px) {
+      #${LATEST_CONVERSATION_NOTICE_ID},
+      #${CTA_ID} {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      #${LATEST_CONVERSATION_NOTICE_ID} .latest-conversation-notice-link,
+      #${CTA_ID} .new-conversation-cta-button {
+        width: 100%;
+        min-width: 0;
+      }
+    }
+
+    @keyframes new-conversation-cta-spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+  `;
+  document.head.appendChild(style);
+
+  const statusCache = Object.create(null);
+  const conversationMetaCache = Object.create(null);
+  const contactConversationsCache = Object.create(null);
+  const autoResolveAttemptCache = Object.create(null);
+  let activeConversationId = null;
+  let lastHref = location.href;
+  let mutationDebounce = null;
+  let navigationTimeoutId = null;
+  let renderSequence = 0;
+
+  function log() {
+    if (!DEBUG || typeof console === "undefined" || !console.log) return;
+    const args = Array.prototype.slice.call(arguments);
+    args.unshift(LOG_PREFIX);
+    console.log.apply(console, args);
+  }
+
+  function parseUrl() {
+    const match = location.pathname.match(/\/app\/accounts\/(\d+)\/conversations\/(\d+)/);
+    return match ? { accountId: match[1], conversationId: match[2] } : null;
+  }
+
+  function isAllowedAccount(accountId) {
+    return Boolean(accountId) && !DENYLIST_ACCOUNTS.has(String(accountId));
+  }
+
+  function getStore() {
+    try {
+      return document.getElementById("app").__vue_app__.config.globalProperties.$store;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function getRouter() {
+    try {
+      const app = document.getElementById("app").__vue_app__;
+      return (
+        (app.config && app.config.globalProperties && app.config.globalProperties.$router) ||
+        (app._instance && app._instance.proxy && app._instance.proxy.$router) ||
+        null
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function findInternalConversationLink(path, sourceElement) {
+    const links = document.querySelectorAll('a[href]');
+    for (let index = 0; index < links.length; index += 1) {
+      const link = links[index];
+      if (link === sourceElement || link.closest("#" + LATEST_CONVERSATION_NOTICE_ID)) continue;
+
+      try {
+        const linkUrl = new URL(link.getAttribute("href"), location.origin);
+        if (linkUrl.origin !== location.origin || linkUrl.pathname !== path) continue;
+        if (link.target && link.target !== "_self") continue;
+        return link;
+      } catch (_) {
+        // Ignore invalid hrefs from third-party widgets.
+      }
+    }
+    return null;
+  }
+
+  function fallbackToHardNavigation(path) {
+    log("navegacao interna indisponivel; usando fallback completo", path);
+    window.location.assign(path);
+  }
+
+  function navigateToConversation(accountId, conversationId, sourceElement) {
+    const path = "/app/accounts/" + accountId + "/conversations/" + conversationId;
+    if (location.pathname === path) return;
+
+    const router = getRouter();
+    if (router && typeof router.push === "function") {
+      log("navegando via router interno", path);
+      cleanupAllUi();
+
+      try {
+        const result = router.push(path);
+        Promise.resolve(result)
+          .then(function () {
+            lastHref = location.href;
+            activeConversationId = null;
+            scheduleRender(500);
+          })
+          .catch(function (error) {
+            log("falha ao navegar via router interno", error);
+            fallbackToHardNavigation(path);
+          });
+        return;
+      } catch (error) {
+        log("erro ao acionar router interno", error);
+      }
+    }
+
+    const internalLink = findInternalConversationLink(path, sourceElement);
+    if (internalLink) {
+      log("navegando via link interno existente", path);
+      cleanupAllUi();
+      internalLink.click();
+      activeConversationId = null;
+      scheduleRender(500);
+      return;
+    }
+
+    fallbackToHardNavigation(path);
+  }
+
+  function getToken() {
+    if (typeof window.authToken === "string" && window.authToken) {
+      return window.authToken;
+    }
+    try {
+      const store = getStore();
+      if (!store) return null;
+      const user = store.getters["auth/getCurrentUser"] || store.getters.getCurrentUser;
+      return (user && user.access_token) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function getStatusFromStore() {
+    try {
+      const store = getStore();
+      if (!store) return null;
+      const chat = store.getters.getSelectedChat || store.getters["getSelectedChat"];
+      return chat && typeof chat.status === "string" ? chat.status : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function normalizeTimestamp(value) {
+    if (typeof value === "number" && isFinite(value)) {
+      return value > 9999999999 ? value : value * 1000;
+    }
+
+    if (typeof value === "string" && value) {
+      const parsed = Date.parse(value);
+      return isNaN(parsed) ? 0 : parsed;
+    }
+
+    return 0;
+  }
+
+  function normalizeInboxId(value) {
+    if (typeof value === "number" && isFinite(value)) return String(value);
+    if (typeof value === "string" && value) return value;
+    if (value && typeof value === "object") {
+      return normalizeInboxId(value.id || value.inbox_id);
+    }
+    return "";
+  }
+
+  function getConversationMetaFromStore(conversationId) {
+    try {
+      const store = getStore();
+      if (!store) return null;
+
+      const chat = store.getters.getSelectedChat || store.getters["getSelectedChat"];
+      if (!chat) return null;
+
+      const chatId = String(chat.id || chat.conversation_id || "");
+      if (chatId && chatId !== String(conversationId)) return null;
+
+      const sender = chat.meta && chat.meta.sender;
+      return {
+        conversationId: String(conversationId),
+        contactId: sender && sender.id ? String(sender.id) : "",
+        inboxId: normalizeInboxId(chat.inbox_id || chat.inbox),
+        createdAtMs: normalizeTimestamp(chat.created_at || chat.timestamp),
+        status: typeof chat.status === "string" ? chat.status : null,
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async function fetchConversationMeta(accountId, conversationId) {
+    const cacheKey = accountId + ":" + conversationId;
+    const cached = conversationMetaCache[cacheKey];
+    if (cached && Date.now() - cached.ts < CONVERSATION_META_CACHE_TTL_MS) {
+      return cached.data;
+    }
+
+    const storeMeta = getConversationMetaFromStore(conversationId);
+    if (storeMeta && storeMeta.contactId && storeMeta.inboxId && storeMeta.createdAtMs) {
+      conversationMetaCache[cacheKey] = { data: storeMeta, ts: Date.now() };
+      return storeMeta;
+    }
+
+    const token = getToken();
+    if (!token) {
+      return storeMeta;
+    }
+
+    try {
+      const response = await fetch(
+        "/api/v1/accounts/" + accountId + "/conversations/" + conversationId,
+        { headers: { api_access_token: token } }
+      );
+      if (!response.ok) {
+        return storeMeta;
+      }
+
+      const payload = await response.json();
+      const sender = payload && payload.meta && payload.meta.sender;
+      const meta = {
+        conversationId: String(conversationId),
+        contactId: sender && sender.id ? String(sender.id) : (storeMeta && storeMeta.contactId) || "",
+        inboxId: normalizeInboxId(
+          (payload && (payload.inbox_id || payload.inbox)) ||
+          (storeMeta && storeMeta.inboxId) ||
+          ""
+        ),
+        createdAtMs: normalizeTimestamp(
+          (payload && (payload.created_at || payload.timestamp)) ||
+          (storeMeta && storeMeta.createdAtMs) ||
+          0
+        ),
+        status:
+          (payload && typeof payload.status === "string" && payload.status) ||
+          (storeMeta && storeMeta.status) ||
+          null,
+      };
+      conversationMetaCache[cacheKey] = { data: meta, ts: Date.now() };
+      return meta;
+    } catch (_) {
+      return storeMeta;
+    }
+  }
+
+  function extractConversationList(payload) {
+    if (Array.isArray(payload)) return payload;
+    if (payload && Array.isArray(payload.payload)) return payload.payload;
+    if (payload && payload.data && Array.isArray(payload.data.payload)) {
+      return payload.data.payload;
+    }
+    return [];
+  }
+
+  function normalizeConversationRecord(rawConversation) {
+    if (!rawConversation || typeof rawConversation !== "object") return null;
+
+    const id = Number(rawConversation.id || rawConversation.conversation_id || 0);
+    const createdAtMs = normalizeTimestamp(
+      rawConversation.created_at || rawConversation.timestamp || rawConversation.last_activity_at
+    );
+    if (!id || !createdAtMs) return null;
+
+    const meta = rawConversation.meta || {};
+    const assignee =
+      meta && typeof meta.assignee === "object" && meta.assignee
+        ? meta.assignee
+        : rawConversation.assignee;
+
+    return {
+      id: id,
+      inboxId: normalizeInboxId(rawConversation.inbox_id || rawConversation.inbox),
+      status:
+        typeof rawConversation.status === "string" && rawConversation.status
+          ? rawConversation.status
+          : "unknown",
+      createdAtMs: createdAtMs,
+      assigneeName:
+        assignee && typeof assignee === "object" && assignee.name
+          ? String(assignee.name)
+          : "",
+    };
+  }
+
+  async function fetchContactConversations(accountId, contactId) {
+    const cacheKey = accountId + ":" + contactId;
+    const cached = contactConversationsCache[cacheKey];
+    if (cached && Date.now() - cached.ts < CONTACT_CONVERSATIONS_CACHE_TTL_MS) {
+      return cached.data;
+    }
+
+    const token = getToken();
+    if (!token) return [];
+
+    try {
+      const response = await fetch(
+        "/api/v1/accounts/" + accountId + "/contacts/" + contactId + "/conversations",
+        { headers: { api_access_token: token } }
+      );
+      if (!response.ok) {
+        log("falha ao consultar conversas do contato", response.status);
+        return [];
+      }
+
+      const payload = await response.json();
+      const conversations = extractConversationList(payload)
+        .map(normalizeConversationRecord)
+        .filter(Boolean);
+
+      contactConversationsCache[cacheKey] = {
+        data: conversations,
+        ts: Date.now(),
+      };
+      return conversations;
+    } catch (_) {
+      log("erro ao consultar conversas do contato");
+      return [];
+    }
+  }
+
+  function findLatestLaterConversation(currentMeta, conversations) {
+    if (!currentMeta || !currentMeta.inboxId || !currentMeta.createdAtMs) return null;
+
+    const currentConversationId = Number(currentMeta.conversationId || 0);
+    const currentCreatedAtMs = currentMeta.createdAtMs;
+    const laterConversations = conversations.filter(function (conversation) {
+      if (!conversation || conversation.id === currentConversationId) return false;
+      if (conversation.inboxId !== currentMeta.inboxId) return false;
+      if (conversation.createdAtMs > currentCreatedAtMs) return true;
+      return conversation.createdAtMs === currentCreatedAtMs && conversation.id > currentConversationId;
+    });
+
+    laterConversations.sort(function (left, right) {
+      if (right.createdAtMs !== left.createdAtMs) {
+        return right.createdAtMs - left.createdAtMs;
+      }
+      return right.id - left.id;
+    });
+
+    return laterConversations[0] || null;
+  }
+
+  function formatConversationStatus(status) {
+    switch (status) {
+      case "open":
+        return "Aberta";
+      case "pending":
+        return "Pendente";
+      case "resolved":
+        return "Resolvida";
+      default:
+        return "Sem status";
+    }
+  }
+
+  function formatConversationDate(createdAtMs) {
+    if (!createdAtMs) return "";
+    try {
+      return new Date(createdAtMs).toLocaleString("pt-BR", {
+        dateStyle: "short",
+        timeStyle: "short",
+      });
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function getReplyBox() {
+    const candidates = document.querySelectorAll(".reply-box");
+    for (let index = 0; index < candidates.length; index += 1) {
+      const candidate = candidates[index];
+      if (!candidate || !candidate.isConnected) continue;
+      if (candidate.offsetParent === null) continue;
+      return candidate;
+    }
+
+    const hiddenCandidate = document.querySelector(
+      ".reply-box[" + HIDDEN_REPLY_ATTR + "='1']"
+    );
+    if (hiddenCandidate && hiddenCandidate.isConnected) {
+      return hiddenCandidate;
+    }
+
+    return null;
+  }
+
+  function getComposerContainer(replyBox) {
+    if (!replyBox) return null;
+
+    let element = replyBox;
+    while (element && element.parentElement) {
+      const parent = element.parentElement;
+      const className = parent.className || "";
+      if (
+        typeof className === "string" &&
+        className.indexOf("flex relative flex-col") !== -1
+      ) {
+        return parent;
+      }
+      element = parent;
+    }
+
+    return replyBox;
+  }
+
+  function findNativeNewConversationButton() {
+    const icons = document.querySelectorAll(".i-ph-chat-circle-dots");
+    for (let index = 0; index < icons.length; index += 1) {
+      const button = icons[index].closest("button");
+      if (!button) continue;
+      const actionBar = button.closest(".flex.items-center.gap-2");
+      if (!actionBar) continue;
+      return button;
+    }
+    return null;
+  }
+
+  function removeCta() {
+    const element = document.getElementById(CTA_ID);
+    if (element) {
+      element.remove();
+    }
+  }
+
+  function removeLatestConversationNotice() {
+    const element = document.getElementById(LATEST_CONVERSATION_NOTICE_ID);
+    if (element) {
+      element.remove();
+    }
+  }
+
+  function hasInstalledCta() {
+    return Boolean(document.getElementById(CTA_ID));
+  }
+
+  function hideComposerElement(element) {
+    if (!element) return;
+    if (!element.hasAttribute(HIDDEN_REPLY_STYLE_ATTR)) {
+      element.setAttribute(HIDDEN_REPLY_STYLE_ATTR, element.style.display || "");
+    }
+    element.classList.add(HIDDEN_REPLY_CLASS);
+    element.setAttribute(HIDDEN_REPLY_ATTR, "1");
+    element.style.setProperty("display", "none", "important");
+  }
+
+  function restoreReplyBox() {
+    const hiddenReplyBoxes = document.querySelectorAll("[" + HIDDEN_REPLY_ATTR + "='1']");
+    hiddenReplyBoxes.forEach(function (element) {
+      element.classList.remove(HIDDEN_REPLY_CLASS);
+      element.removeAttribute(HIDDEN_REPLY_ATTR);
+      const previousDisplay = element.getAttribute(HIDDEN_REPLY_STYLE_ATTR);
+      if (previousDisplay) {
+        element.style.setProperty("display", previousDisplay);
+      } else {
+        element.style.removeProperty("display");
+      }
+      element.removeAttribute(HIDDEN_REPLY_STYLE_ATTR);
+    });
+  }
+
+  function cleanupResolvedUi() {
+    window.clearTimeout(navigationTimeoutId);
+    navigationTimeoutId = null;
+    removeCta();
+    restoreReplyBox();
+  }
+
+  function cleanupAllUi() {
+    cleanupResolvedUi();
+    removeLatestConversationNotice();
+  }
+
+  function setBusyState(isBusy) {
+    const cta = document.getElementById(CTA_ID);
+    if (!cta) return;
+
+    const button = cta.querySelector(".new-conversation-cta-button");
+    cta.classList.toggle(CTA_BUSY_CLASS, isBusy);
+    if (button) {
+      button.disabled = isBusy;
+    }
+  }
+
+  async function fetchConversationStatus(accountId, conversationId) {
+    const cacheKey = accountId + ":" + conversationId;
+    const cached = statusCache[cacheKey];
+    if (cached && Date.now() - cached.ts < STATUS_CACHE_TTL_MS) {
+      log("status cache", cacheKey, cached.status);
+      return cached.status;
+    }
+
+    const token = getToken();
+    if (!token) {
+      log("sem token, usando status do store");
+      return getStatusFromStore();
+    }
+
+    try {
+      const response = await fetch(
+        "/api/v1/accounts/" + accountId + "/conversations/" + conversationId,
+        { headers: { api_access_token: token } }
+      );
+      if (!response.ok) {
+        log("falha ao consultar conversa", response.status);
+        return getStatusFromStore();
+      }
+      const payload = await response.json();
+      const status = payload && typeof payload.status === "string" ? payload.status : null;
+      statusCache[cacheKey] = { status: status, ts: Date.now() };
+      log("status api", cacheKey, status);
+      return status;
+    } catch (_) {
+      log("erro ao consultar status, fallback store");
+      return getStatusFromStore();
+    }
+  }
+
+  function rememberResolvedStatus(accountId, conversationId) {
+    const cacheKey = accountId + ":" + conversationId;
+    statusCache[cacheKey] = { status: "resolved", ts: Date.now() };
+    if (conversationMetaCache[cacheKey] && conversationMetaCache[cacheKey].data) {
+      conversationMetaCache[cacheKey].data.status = "resolved";
+      conversationMetaCache[cacheKey].ts = Date.now();
+    }
+  }
+
+  async function fetchConversationLabels(accountId, conversationId, token) {
+    const response = await fetch(
+      "/api/v1/accounts/" + accountId + "/conversations/" + conversationId,
+      { headers: { api_access_token: token } }
+    );
+    if (!response.ok) {
+      throw new Error("Falha ao buscar etiquetas: " + response.status);
+    }
+
+    const payload = await response.json();
+    return Array.isArray(payload.labels) ? payload.labels : [];
+  }
+
+  async function setConversationLabels(accountId, conversationId, labels, token) {
+    const response = await fetch(
+      "/api/v1/accounts/" + accountId + "/conversations/" + conversationId + "/labels",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          api_access_token: token,
+        },
+        body: JSON.stringify({ labels: labels }),
+      }
+    );
+    if (!response.ok) {
+      throw new Error("Falha ao salvar etiquetas: " + response.status);
+    }
+  }
+
+  async function ensureNoSurveyLabel(accountId, conversationId, token) {
+    try {
+      const currentLabels = await fetchConversationLabels(accountId, conversationId, token);
+      if (currentLabels.indexOf(NO_SURVEY_LABEL) !== -1) {
+        return true;
+      }
+
+      const labels = currentLabels.slice();
+      labels.push(NO_SURVEY_LABEL);
+      await setConversationLabels(accountId, conversationId, labels, token);
+      log("etiqueta adicionada antes de encerrar conversa", NO_SURVEY_LABEL, conversationId);
+      return true;
+    } catch (error) {
+      log("erro ao adicionar etiqueta antes de encerrar conversa", error);
+      return false;
+    }
+  }
+
+  async function resolveConversation(accountId, conversationId) {
+    const token = getToken();
+    if (!token) {
+      log("sem token para encerrar conversa atual");
+      return false;
+    }
+
+    const hasNoSurveyLabel = await ensureNoSurveyLabel(accountId, conversationId, token);
+    if (!hasNoSurveyLabel) {
+      log("encerramento cancelado porque a etiqueta nao foi aplicada", conversationId);
+      return false;
+    }
+
+    try {
+      const response = await fetch(
+        "/api/v1/accounts/" + accountId + "/conversations/" + conversationId + "/toggle_status",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            api_access_token: token,
+          },
+          body: JSON.stringify({ status: "resolved" }),
+        }
+      );
+      if (!response.ok) {
+        log("falha ao encerrar conversa atual", response.status);
+        return false;
+      }
+
+      rememberResolvedStatus(accountId, conversationId);
+      log("conversa atual encerrada automaticamente", conversationId);
+      return true;
+    } catch (_) {
+      log("erro ao encerrar conversa atual");
+      return false;
+    }
+  }
+
+  async function resolveCurrentConversationIfLatestIsOpen(accountId, conversationId, latestConversation) {
+    if (!latestConversation || latestConversation.status !== "open") return false;
+
+    const cacheKey = accountId + ":" + conversationId;
+    const cachedStatus = statusCache[cacheKey];
+    if (cachedStatus && cachedStatus.status === "resolved") return false;
+
+    const lastAttemptAt = autoResolveAttemptCache[cacheKey] || 0;
+    if (Date.now() - lastAttemptAt < AUTO_RESOLVE_ATTEMPT_TTL_MS) return false;
+
+    autoResolveAttemptCache[cacheKey] = Date.now();
+    log("conversa posterior aberta; encerrando conversa atual", {
+      currentConversationId: conversationId,
+      latestConversationId: latestConversation.id,
+    });
+    return resolveConversation(accountId, conversationId);
+  }
+
+  function buildCta() {
+    const container = document.createElement("div");
+    container.id = CTA_ID;
+    container.innerHTML =
+      '<div class="new-conversation-cta-copy">' +
+        '<p class="new-conversation-cta-title">Esta conversa está encerrada.</p>' +
+        '<p class="new-conversation-cta-text">Para falar novamente com o cliente sem reabrir este atendimento, inicie uma nova conversa.</p>' +
+      '</div>' +
+      '<button type="button" class="new-conversation-cta-button">' +
+        '<span class="new-conversation-cta-spinner"></span>' +
+        '<span class="new-conversation-cta-label">Nova conversa</span>' +
+      '</button>';
+    return container;
+  }
+
+  function buildLatestConversationNotice(accountId, conversation) {
+    const container = document.createElement("div");
+    const statusClass = "is-" + String(conversation.status || "unknown").toLowerCase();
+    const statusLabel = formatConversationStatus(conversation.status);
+    const createdAtLabel = formatConversationDate(conversation.createdAtMs);
+    const assigneeLabel = conversation.assigneeName
+      ? '<span class="latest-conversation-notice-detail">Atendente: ' + conversation.assigneeName + "</span>"
+      : "";
+
+    container.id = LATEST_CONVERSATION_NOTICE_ID;
+    container.setAttribute("data-conversation-id", String(conversation.id));
+    container.innerHTML =
+      '<div class="latest-conversation-notice-copy">' +
+        '<p class="latest-conversation-notice-title">Existe uma conversa mais recente deste contato.</p>' +
+        '<p class="latest-conversation-notice-text">A conversa #' +
+        String(conversation.id) +
+        (createdAtLabel ? " foi criada em " + createdAtLabel : " foi criada depois desta") +
+        ". Abra a conversa mais recente para continuar o atendimento.</p>" +
+        '<div class="latest-conversation-notice-meta">' +
+          '<span class="latest-conversation-notice-badge ' + statusClass + '">' + statusLabel + "</span>" +
+          assigneeLabel +
+        "</div>" +
+      "</div>" +
+      '<a class="latest-conversation-notice-link" href="/app/accounts/' +
+      accountId +
+      "/conversations/" +
+      conversation.id +
+      '">Abrir conversa mais recente</a>';
+
+    const link = container.querySelector(".latest-conversation-notice-link");
+    if (link) {
+      link.addEventListener("click", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        navigateToConversation(accountId, conversation.id, link);
+      });
+    }
+
+    return container;
+  }
+
+  function installLatestConversationNotice(replyBox, accountId, conversation) {
+    const composerContainer = getComposerContainer(replyBox);
+    const host = composerContainer && composerContainer.parentElement;
+    if (!host) return;
+
+    const installed = document.getElementById(LATEST_CONVERSATION_NOTICE_ID);
+    if (installed && installed.getAttribute("data-conversation-id") === String(conversation.id)) {
+      return;
+    }
+
+    removeLatestConversationNotice();
+    const notice = buildLatestConversationNotice(accountId, conversation);
+    const cta = document.getElementById(CTA_ID);
+
+    if (cta && cta.parentElement === host) {
+      host.insertBefore(notice, cta);
+      return;
+    }
+
+    host.insertBefore(notice, composerContainer);
+  }
+
+  function installCta(replyBox, nativeButton) {
+    const composerContainer = getComposerContainer(replyBox);
+    const host = composerContainer && composerContainer.parentElement;
+    if (!host || document.getElementById(CTA_ID)) return;
+
+    const cta = buildCta();
+    const actionButton = cta.querySelector(".new-conversation-cta-button");
+    actionButton.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+
+      const currentNativeButton = findNativeNewConversationButton();
+      if (!currentNativeButton) {
+        log("botao nativo nao encontrado no clique");
+        cleanupResolvedUi();
+        return;
+      }
+
+      log("acionando botao nativo de nova conversa");
+      setBusyState(true);
+      currentNativeButton.click();
+
+      window.clearTimeout(navigationTimeoutId);
+      navigationTimeoutId = window.setTimeout(function () {
+        const ctx = parseUrl();
+        if (ctx && ctx.conversationId === activeConversationId) {
+          setBusyState(false);
+        }
+      }, NAVIGATION_WAIT_MS);
+    });
+
+    hideComposerElement(replyBox);
+    if (composerContainer !== replyBox) {
+      hideComposerElement(composerContainer);
+    }
+    host.insertBefore(cta, composerContainer);
+  }
+
+  async function render() {
+    const sequence = ++renderSequence;
+    const context = parseUrl();
+    if (!context || !isAllowedAccount(context.accountId)) {
+      log("fora de contexto ou conta bloqueada", context);
+      activeConversationId = null;
+      cleanupAllUi();
+      return;
+    }
+
+    activeConversationId = context.conversationId;
+    log("render", context);
+
+    const replyBox = getReplyBox();
+    const nativeButton = findNativeNewConversationButton();
+    if (!replyBox) {
+      log("reply box ausente", {
+        replyBox: Boolean(replyBox),
+        nativeButton: Boolean(nativeButton),
+      });
+      cleanupAllUi();
+      return;
+    }
+
+    log("composer alvo", {
+      replyBoxClass: replyBox.className,
+      composerContainerClass: (getComposerContainer(replyBox) || {}).className || null,
+    });
+
+    const currentMeta = await fetchConversationMeta(context.accountId, context.conversationId);
+    if (sequence !== renderSequence) return;
+
+    if (currentMeta && currentMeta.contactId && currentMeta.inboxId && currentMeta.createdAtMs) {
+      const contactConversations = await fetchContactConversations(
+        context.accountId,
+        currentMeta.contactId
+      );
+      if (sequence !== renderSequence) return;
+
+      const latestLaterConversation = findLatestLaterConversation(currentMeta, contactConversations);
+      if (latestLaterConversation) {
+        log("conversa posterior encontrada", latestLaterConversation);
+        installLatestConversationNotice(replyBox, context.accountId, latestLaterConversation);
+        await resolveCurrentConversationIfLatestIsOpen(
+          context.accountId,
+          context.conversationId,
+          latestLaterConversation
+        );
+        if (sequence !== renderSequence) return;
+      } else {
+        removeLatestConversationNotice();
+      }
+    } else {
+      log("metadados insuficientes para localizar conversa posterior na mesma caixa", currentMeta);
+      removeLatestConversationNotice();
+    }
+
+    if (!nativeButton) {
+      log("botao nativo ausente; mantendo apenas aviso de conversa posterior");
+      cleanupResolvedUi();
+      return;
+    }
+
+    const storeStatus = getStatusFromStore();
+    if (storeStatus && storeStatus !== "resolved") {
+      log("store indica conversa nao resolvida", storeStatus);
+      cleanupResolvedUi();
+    }
+
+    const resolvedStatus = await fetchConversationStatus(context.accountId, context.conversationId);
+    if (sequence !== renderSequence) return;
+
+    const currentContext = parseUrl();
+    if (!currentContext || currentContext.conversationId !== context.conversationId) {
+      log("conversa mudou durante render");
+      return;
+    }
+
+    if (resolvedStatus !== "resolved") {
+      log("status final nao resolved", resolvedStatus);
+      cleanupResolvedUi();
+      return;
+    }
+
+    if (hasInstalledCta()) {
+      log("CTA ja instalada; mantendo estado atual");
+      return;
+    }
+
+    log("instalando CTA");
+    installCta(replyBox, nativeButton);
+  }
+
+  function scheduleRender(delayMs) {
+    window.setTimeout(function () {
+      render();
+      rebindObserver();
+    }, delayMs || 0);
+  }
+
+  let observerTarget = null;
+  let observerIsBootstrap = false;
+  const OBSERVER_OPTIONS = { childList: true, subtree: true };
+  const BOOTSTRAP_RETARGET_INTERVAL_MS = 1500;
+  let bootstrapRetargetId = null;
+
+  function findObserverTarget() {
+    const replyBox = getReplyBox();
+    if (replyBox) {
+      return (
+        replyBox.closest(".conversation--details") ||
+        replyBox.closest(".current-chat") ||
+        replyBox.closest("main") ||
+        (replyBox.parentElement && replyBox.parentElement.parentElement) ||
+        document.body
+      );
+    }
+
+    // Fallback: tenta o painel principal de conversas para evitar observar
+    // todo o body enquanto a reply-box ainda nao foi montada.
+    return (
+      document.querySelector(".current-chat") ||
+      document.querySelector(".conversation--details") ||
+      document.querySelector("main") ||
+      document.body
+    );
+  }
+
+  function rebindObserver() {
+    const target = findObserverTarget();
+    if (target === observerTarget) return;
+    observer.disconnect();
+    observerTarget = target;
+    observerIsBootstrap = target === document.body;
+    observer.observe(target, OBSERVER_OPTIONS);
+    log("observer alvo", {
+      tag: target.tagName,
+      cls: target.className || null,
+      bootstrap: observerIsBootstrap,
+    });
+
+    // Enquanto estamos ancorados no body (estado degradado), tenta periodicamente
+    // achar um alvo mais especifico para reduzir o trafego de mutations.
+    if (observerIsBootstrap) {
+      if (!bootstrapRetargetId) {
+        bootstrapRetargetId = window.setInterval(rebindObserver, BOOTSTRAP_RETARGET_INTERVAL_MS);
+      }
+    } else if (bootstrapRetargetId) {
+      window.clearInterval(bootstrapRetargetId);
+      bootstrapRetargetId = null;
+    }
+  }
+
+  const observer = new MutationObserver(function () {
+    if (mutationDebounce) return;
+    mutationDebounce = window.setTimeout(function () {
+      mutationDebounce = null;
+      render();
+      rebindObserver();
+    }, 350);
+  });
+
+  function start() {
+    rebindObserver();
+    log("script carregado", { href: location.href });
+    render();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", start);
+  } else {
+    start();
+  }
+
+  window.setInterval(function () {
+    if (location.href === lastHref) return;
+    lastHref = location.href;
+    activeConversationId = null;
+    cleanupAllUi();
+    log("navegacao detectada", lastHref);
+    const context = parseUrl();
+    if (context && isAllowedAccount(context.accountId)) {
+      scheduleRender(500);
+    } else {
+      // Conversa atual saiu do escopo: re-ancora o observer para nao seguir
+      // observando uma subarvore irrelevante (ou o body inteiro).
+      rebindObserver();
+    }
+  }, 1000);
+})();
+</script>

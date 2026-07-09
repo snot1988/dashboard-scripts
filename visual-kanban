@@ -1,0 +1,165 @@
+<script>
+(function() {
+  'use strict';
+
+  var STYLE_ID    = 'mdzap-kanban-trello-style';
+  var OBS_KEY     = '__kanbanTrelloObs';
+  var COVER_CACHE = {}; // itemId -> imageUrl | null | 'pending'
+
+  if (document.getElementById(STYLE_ID)) return;
+
+  /* ── CSS ──────────────────────────────────────────────────────── */
+  var style = document.createElement('style');
+  style.id = STYLE_ID;
+  style.textContent = [
+    /* Title: wrap instead of truncate */
+    '[draggable="true"] span.truncate.font-semibold {',
+    '  white-space: normal !important;',
+    '  overflow: visible !important;',
+    '  text-overflow: unset !important;',
+    '  word-break: break-word !important;',
+    '  display: block !important;',
+    '}',
+    /* Cover image */
+    '.kbt-cover {',
+    '  display: block !important;',
+    '  width: 100% !important;',
+    '  height: 160px !important;',
+    '  object-fit: cover !important;',
+    '  border-radius: inherit !important;',
+    '  border-bottom-left-radius: 0 !important;',
+    '  border-bottom-right-radius: 0 !important;',
+    '  margin: 0 !important;',
+    '}',
+  ].join('\n');
+  document.head.appendChild(style);
+
+  /* ── Auth ─────────────────────────────────────────────────────── */
+  function getAuth() {
+    try {
+      var store = document.getElementById('app').__vue_app__.config.globalProperties.$store;
+      var user  = store.getters['getCurrentUser'] || store.getters.getCurrentUser;
+      var accId = store.getters['getCurrentAccountId'] || store.getters.getCurrentAccountId;
+      return (user && user.access_token && accId)
+        ? { token: user.access_token, accId: accId }
+        : null;
+    } catch(_) { return null; }
+  }
+
+  function apiFetch(auth, path) {
+    return fetch('/api/v1/accounts/' + auth.accId + path, {
+      headers: { api_access_token: auth.token }
+    }).then(function(r) { return r.ok ? r.json() : null; })
+      .catch(function() { return null; });
+  }
+
+  /* ── Extract item # from card DOM ─────────────────────────────── */
+  function getItemId(card) {
+    var spans = card.querySelectorAll('span');
+    for (var i = 0; i < spans.length; i++) {
+      var m = spans[i].textContent.trim().match(/^#(\d+)$/);
+      if (m) return m[1];
+    }
+    return null;
+  }
+
+  /* ── Inject cover image ───────────────────────────────────────── */
+  function injectCover(card, url) {
+    if (card.querySelector('.kbt-cover')) return;
+    var img = document.createElement('img');
+    img.className = 'kbt-cover';
+    img.src = url;
+    img.alt = '';
+    img.onerror = function() { this.remove(); };
+    card.insertBefore(img, card.firstChild);
+  }
+
+  /* ── Fetch attachments for one item ───────────────────────────── */
+  function fetchCover(auth, itemId) {
+    if (COVER_CACHE.hasOwnProperty(itemId)) return Promise.resolve();
+    COVER_CACHE[itemId] = 'pending';
+
+    return apiFetch(auth, '/kanban/items/' + itemId + '/attachments').then(function(data) {
+      var attachments = (data && data.attachments) || [];
+      /* Pick first image attachment */
+      var imageUrl = null;
+      for (var i = 0; i < attachments.length; i++) {
+        var a = attachments[i];
+        if (a.content_type && a.content_type.indexOf('image') === 0 && a.url) {
+          imageUrl = a.url;
+          break;
+        }
+      }
+      COVER_CACHE[itemId] = imageUrl; // null if no image
+      if (imageUrl) {
+        /* Find card in DOM and inject */
+        var cards = document.querySelectorAll('[draggable="true"].w-full.border.rounded-xl');
+        cards.forEach(function(card) {
+          if (getItemId(card) === itemId) injectCover(card, imageUrl);
+        });
+      }
+    });
+  }
+
+  /* ── Scan visible cards and fetch missing covers ──────────────── */
+  function scanCards(auth) {
+    var cards = document.querySelectorAll('[draggable="true"].w-full.border.rounded-xl');
+    var pending = [];
+    cards.forEach(function(card) {
+      var itemId = getItemId(card);
+      if (!itemId) return;
+      if (COVER_CACHE[itemId] && COVER_CACHE[itemId] !== 'pending') {
+        /* Already fetched and has image — inject if missing */
+        if (!card.querySelector('.kbt-cover')) injectCover(card, COVER_CACHE[itemId]);
+      } else if (!COVER_CACHE.hasOwnProperty(itemId)) {
+        pending.push(itemId);
+      }
+    });
+    /* Fetch in batches of 5 */
+    function nextBatch() {
+      var batch = pending.splice(0, 5);
+      if (!batch.length) return;
+      Promise.all(batch.map(function(id) { return fetchCover(auth, id); }))
+        .then(nextBatch);
+    }
+    nextBatch();
+  }
+
+  /* ── MutationObserver ─────────────────────────────────────────── */
+  function startObserver(auth) {
+    if (window[OBS_KEY]) return;
+    var target = document.querySelector('main') || document.body;
+    var debounce = null;
+    var obs = new MutationObserver(function() {
+      clearTimeout(debounce);
+      debounce = setTimeout(function() { scanCards(auth); }, 400);
+    });
+    obs.observe(target, { childList: true, subtree: true });
+    window[OBS_KEY] = obs;
+  }
+
+  /* ── Boot ─────────────────────────────────────────────────────── */
+  function boot() {
+    if (!location.pathname.includes('/kanban')) return;
+    var auth = getAuth();
+    if (!auth) { setTimeout(boot, 1000); return; }
+    startObserver(auth);
+    scanCards(auth);
+  }
+
+  setTimeout(boot, 1200);
+
+  /* ── SPA navigation ───────────────────────────────────────────── */
+  var lastPath = location.pathname;
+  setInterval(function() {
+    if (location.pathname === lastPath) return;
+    lastPath = location.pathname;
+    if (location.pathname.includes('/kanban')) {
+      setTimeout(boot, 1200);
+    } else {
+      if (window[OBS_KEY]) { window[OBS_KEY].disconnect(); window[OBS_KEY] = null; }
+    }
+  }, 1000);
+
+})();
+</script>

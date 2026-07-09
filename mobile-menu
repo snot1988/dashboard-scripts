@@ -1,0 +1,302 @@
+<script>
+(function () {
+  'use strict';
+
+  const mobileQuery = window.matchMedia('(max-width: 768px)');
+  const IS_MOBILE = () => mobileQuery.matches;
+
+  const ACCOUNT_ID = (
+    window.location.pathname.match(/accounts\/(\d+)/) || []
+  )[1];
+
+  function qs(selector, root) {
+    return (root || document).querySelector(selector);
+  }
+
+  function isInsideConversation() {
+    return /\/app\/accounts\/\d+\/conversations\/\d+/.test(
+      window.location.pathname
+    );
+  }
+
+  function navigate(url) {
+    closeSheet();
+
+    if (window.location.pathname === url) return;
+
+    window.history.pushState({}, '', url);
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  }
+
+  function injectStyles() {
+    if (qs('#mdzap-mobile-style')) return;
+
+    const style = document.createElement('style');
+    style.id = 'mdzap-mobile-style';
+
+    style.innerHTML = `
+      @media(max-width:768px){
+
+        body{
+          padding-bottom:72px!important;
+        }
+
+        .mdzap-mobile-bottom-menu{
+          position:fixed;
+          left:8px;
+          right:8px;
+          bottom:8px;
+          height:62px;
+          background:#1f232b;
+          border:1px solid rgba(0,191,165,.22);
+          border-radius:16px;
+          display:flex;
+          z-index:999998;
+          overflow:hidden;
+        }
+
+        .mdzap-mobile-item{
+          flex:1;
+          display:flex;
+          flex-direction:column;
+          align-items:center;
+          justify-content:center;
+          color:#00bfa5;
+          font-size:10px;
+          font-weight:700;
+          cursor:pointer;
+          user-select:none;
+        }
+
+        .mdzap-mobile-item:active{
+          background:rgba(0,191,165,.10);
+        }
+
+        .mdzap-mobile-icon{
+          font-size:15px;
+          margin-bottom:3px;
+        }
+
+        .mdzap-mobile-overlay{
+          position:fixed;
+          inset:0;
+          background:rgba(0,0,0,.35);
+          z-index:999998;
+        }
+
+        .mdzap-mobile-sheet{
+          position:fixed;
+          left:8px;
+          right:8px;
+          bottom:78px;
+          background:#1f232b;
+          border-radius:18px;
+          padding:14px;
+          z-index:999999;
+        }
+
+        .mdzap-mobile-sheet-title{
+          color:#00bfa5;
+          font-size:15px;
+          font-weight:700;
+          margin-bottom:12px;
+        }
+
+        .mdzap-mobile-sheet-item{
+          padding:13px;
+          border-radius:12px;
+          background:rgba(0,191,165,.06);
+          color:#f3f4f6;
+          margin-bottom:8px;
+          font-size:13px;
+          font-weight:600;
+          cursor:pointer;
+        }
+
+        .mdzap-mobile-sheet-item:active{
+          background:rgba(0,191,165,.15);
+        }
+      }
+    `;
+
+    document.head.appendChild(style);
+  }
+
+  function closeSheet() {
+    qs('#mdzap-mobile-overlay')?.remove();
+    qs('#mdzap-mobile-sheet')?.remove();
+  }
+
+  function openSheet(title, items) {
+    closeSheet();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'mdzap-mobile-overlay';
+    overlay.className = 'mdzap-mobile-overlay';
+    overlay.onclick = closeSheet;
+
+    const sheet = document.createElement('div');
+    sheet.id = 'mdzap-mobile-sheet';
+    sheet.className = 'mdzap-mobile-sheet';
+
+    let html = `<div class="mdzap-mobile-sheet-title">${title}</div>`;
+
+    items.forEach(item => {
+      html += `
+        <div
+          class="mdzap-mobile-sheet-item"
+          data-url="${item.url || ''}"
+          data-action="${item.action || ''}"
+        >
+          ${item.label}
+        </div>
+      `;
+    });
+
+    sheet.innerHTML = html;
+
+    document.body.appendChild(overlay);
+    document.body.appendChild(sheet);
+
+    sheet.addEventListener('click', function(e) {
+      const item = e.target.closest('.mdzap-mobile-sheet-item');
+      if (!item) return;
+
+      const action = item.dataset.action;
+      const url = item.dataset.url;
+
+      if (action === 'newconversation') {
+        closeSheet();
+
+        const btn =
+          document.querySelector('button .i-lucide-pen-line')
+          ?.closest('button');
+
+        if (btn) btn.click();
+
+        return;
+      }
+
+      if (url) {
+        navigate(url);
+      }
+    });
+  }
+
+  function createMobileMenu() {
+    if (!IS_MOBILE()) return;
+    if (!ACCOUNT_ID) return;
+    if (qs('#mdzap-mobile-bottom-menu')) return;
+
+    const menu = document.createElement('div');
+
+    menu.id = 'mdzap-mobile-bottom-menu';
+    menu.className = 'mdzap-mobile-bottom-menu';
+
+    menu.innerHTML = `
+      <div class="mdzap-mobile-item" data-action="chats">
+        <div class="mdzap-mobile-icon">💬</div>
+        <div>Chats</div>
+      </div>
+
+      <div class="mdzap-mobile-item" data-action="contacts">
+        <div class="mdzap-mobile-icon">👥</div>
+        <div>Contatos</div>
+      </div>
+
+      <div class="mdzap-mobile-item" data-action="new">
+        <div class="mdzap-mobile-icon">➕</div>
+        <div>Nova</div>
+      </div>
+
+      <div class="mdzap-mobile-item" data-action="reports">
+        <div class="mdzap-mobile-icon">📊</div>
+        <div>Relatórios</div>
+      </div>
+
+      <div class="mdzap-mobile-item" data-action="settings">
+        <div class="mdzap-mobile-icon">⚙️</div>
+        <div>Config</div>
+      </div>
+    `;
+
+    document.body.appendChild(menu);
+
+    menu.addEventListener('click', function(e) {
+      const item = e.target.closest('.mdzap-mobile-item');
+      if (!item) return;
+
+      const action = item.dataset.action;
+
+      if (action === 'chats') {
+        openSheet('Chats', [
+          { label: '💬 Todas as conversas', url: `/app/accounts/${ACCOUNT_ID}/dashboard` },
+          { label: '🔔 Menções', url: `/app/accounts/${ACCOUNT_ID}/mentions/conversations` },
+          { label: '🤝 Participantes', url: `/app/accounts/${ACCOUNT_ID}/participating/conversations` },
+          { label: '👥 Grupos', url: `/app/accounts/${ACCOUNT_ID}/groups/conversations` },
+          { label: '📩 Não lidas', url: `/app/accounts/${ACCOUNT_ID}/unread/conversations` },
+          { label: '⏳ Não atendidas', url: `/app/accounts/${ACCOUNT_ID}/unattended/conversations` }
+        ]);
+      }
+
+      if (action === 'contacts') {
+        navigate(`/app/accounts/${ACCOUNT_ID}/contacts`);
+      }
+
+      if (action === 'new') {
+        openSheet('Nova', [
+          { label: '💬 Nova conversa', action: 'newconversation' },
+          { label: '📅 Agendar mensagem', url: `/app/accounts/${ACCOUNT_ID}/scheduled-messages` },
+          { label: '📣 Campanhas', url: `/app/accounts/${ACCOUNT_ID}/campaigns/whatsapp` }
+        ]);
+      }
+
+      if (action === 'reports') {
+        openSheet('Relatórios', [
+          { label: '🔭 Visão geral', url: `/app/accounts/${ACCOUNT_ID}/reports/overview` },
+          { label: '💬 Conversas', url: `/app/accounts/${ACCOUNT_ID}/reports/conversation` },
+          { label: '🧑‍💼 Agentes', url: `/app/accounts/${ACCOUNT_ID}/reports/agents_overview` },
+          { label: '🏷️ Etiquetas', url: `/app/accounts/${ACCOUNT_ID}/reports/labels_overview` },
+          { label: '📥 Caixas de entrada', url: `/app/accounts/${ACCOUNT_ID}/reports/inboxes_overview` },
+          { label: '👥 Time', url: `/app/accounts/${ACCOUNT_ID}/reports/teams_overview` },
+          { label: '📋 Kanban', url: `/app/accounts/${ACCOUNT_ID}/reports/kanban` },
+          { label: '⭐ CSAT', url: `/app/accounts/${ACCOUNT_ID}/reports/csat` },
+          { label: '🎯 SLA', url: `/app/accounts/${ACCOUNT_ID}/reports/sla` },
+          { label: '📞 Chamadas', url: `/app/accounts/${ACCOUNT_ID}/reports/calls` },
+          { label: '🤖 Robôs', url: `/app/accounts/${ACCOUNT_ID}/reports/bot` }
+        ]);
+      }
+
+      if (action === 'settings') {
+        openSheet('Configurações', [
+          { label: '👤 Meu perfil', url: `/app/accounts/${ACCOUNT_ID}/profile/settings` },
+          { label: '📋 Kanban', url: `/app/accounts/${ACCOUNT_ID}/kanban` },
+          { label: '🏢 Conta', url: `/app/accounts/${ACCOUNT_ID}/settings/general` },
+          { label: '🧑‍💼 Agentes', url: `/app/accounts/${ACCOUNT_ID}/settings/agents/list` },
+          { label: '👥 Times', url: `/app/accounts/${ACCOUNT_ID}/settings/teams/list` },
+          { label: '📥 Caixas de entrada', url: `/app/accounts/${ACCOUNT_ID}/settings/inboxes/list` },
+          { label: '🏷️ Etiquetas', url: `/app/accounts/${ACCOUNT_ID}/settings/labels/list` },
+          { label: '🔧 Funções personalizadas', url: `/app/accounts/${ACCOUNT_ID}/settings/custom-roles/list` }
+        ]);
+      }
+    });
+  }
+
+  function syncMenu() {
+    const menu = qs('#mdzap-mobile-bottom-menu');
+
+    if (!menu) return;
+
+    menu.style.display = isInsideConversation()
+      ? 'none'
+      : 'flex';
+  }
+
+  injectStyles();
+  createMobileMenu();
+  syncMenu();
+
+  setInterval(syncMenu, 1000);
+
+})();
+</script>

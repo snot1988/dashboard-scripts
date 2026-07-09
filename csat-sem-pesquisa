@@ -1,0 +1,344 @@
+<script>
+/* ==========================================================================
+   MEGA - RESOLVER SEM PESQUISA CSAT
+   Adiciona um botão "Resolver sem pesquisa" na barra de ações da conversa.
+   Ao clicar, aplica a etiqueta definida em LABEL_TAG à conversa e altera
+   o status para "resolved", impedindo o disparo do e-mail de pesquisa CSAT.
+
+   Instalação: Super Admin → Dashboard Apps → adicione como Custom Script.
+   Configuração: ajuste LABEL_TAG (linha ~13) se o nome da etiqueta na sua
+   instalação for diferente de "nao_enviar_pesquisa".
+   ========================================================================== */
+(function () {
+  'use strict';
+
+  const STYLE_ID  = 'resolve-no-csat-style';
+  const BTN_ID    = 'resolve-no-csat-btn';
+  const LABEL_TAG = 'nao_enviar_pesquisa';
+
+  /* IDs de contas que devem exibir o botão */
+  const ALLOWLIST_ACCOUNTS = new Set(['1', '5', '11']);
+
+  if (document.getElementById(STYLE_ID)) return;
+
+  /* ── Detectar mobile ──────────────────────────────────────────────── */
+  function isMobile() {
+    return window.innerWidth <= 768 ||
+      /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|WPDesktop/i.test(navigator.userAgent);
+  }
+
+  /* ── CSS ──────────────────────────────────────────────────────────── */
+  const css = document.createElement('style');
+  css.id = STYLE_ID;
+  css.textContent = `
+    #${BTN_ID} {
+      display: inline-flex;
+      align-items: center;
+      min-width: 0;
+      gap: 6px;
+      transition: all .1s ease-out;
+      border: 0;
+      border-radius: 8px;
+      outline: 1px solid transparent;
+      height: 32px;
+      padding: 0 10px;
+      font-size: .8125rem;
+      font-weight: 500;
+      cursor: pointer;
+      white-space: nowrap;
+      background: rgba(239,68,68,.10);
+      color: #dc2626;
+    }
+    #${BTN_ID}.is-mobile {
+      padding: 0;
+      width: 32px;
+      justify-content: center;
+      border-radius: 50%;
+    }
+    #${BTN_ID}:hover {
+      background: rgba(239,68,68,.18);
+    }
+    #${BTN_ID}:active:not(.is-busy) {
+      transform: scale(.97);
+    }
+    #${BTN_ID}.is-busy {
+      opacity: .55;
+      pointer-events: none;
+    }
+    .dark #${BTN_ID} {
+      background: rgba(248,113,113,.12);
+      color: #f87171;
+    }
+    .dark #${BTN_ID}:hover {
+      background: rgba(248,113,113,.20);
+    }
+    #${BTN_ID} .rncsat-icon {
+      flex-shrink: 0;
+      width: 16px;
+      height: 16px;
+    }
+    #${BTN_ID} .rncsat-label {
+      /* oculto no mobile via JS ao construir o botão */
+    }
+    #${BTN_ID} .rncsat-spinner {
+      display: none;
+      width: 14px;
+      height: 14px;
+      border: 2px solid currentColor;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: rncsat-spin .6s linear infinite;
+    }
+    #${BTN_ID}.is-busy .rncsat-spinner { display: inline-block; }
+    #${BTN_ID}.is-busy .rncsat-icon   { display: none; }
+    @keyframes rncsat-spin { to { transform: rotate(360deg); } }
+  `;
+  document.head.appendChild(css);
+
+  /* ── SVG: ícone de check com caixa (desktop) ─────────────────────── */
+  const ICON_DESKTOP =
+    '<svg class="rncsat-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M9 11l3 3L22 4"/>' +
+    '<path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>' +
+    '</svg>';
+
+  /* ── SVG: ícone X (mobile) ───────────────────────────────────────── */
+  const ICON_MOBILE =
+    '<svg class="rncsat-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">' +
+    '<line x1="18" y1="6" x2="6" y2="18"/>' +
+    '<line x1="6" y1="6" x2="18" y2="18"/>' +
+    '</svg>';
+
+  /* ── Helpers ─────────────────────────────────────────────────────── */
+  function parseUrl() {
+    const m = location.pathname.match(
+      /\/app\/accounts\/(\d+)\/conversations\/(\d+)/
+    );
+    return m ? { accountId: m[1], convId: m[2] } : null;
+  }
+
+  function isAllowedAccount(accountId) {
+    return Boolean(accountId) && ALLOWLIST_ACCOUNTS.has(String(accountId));
+  }
+
+  function getStore() {
+    try {
+      return document.getElementById('app')
+        .__vue_app__.config.globalProperties.$store;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function getToken() {
+    if (typeof window.authToken === 'string' && window.authToken) {
+      return window.authToken;
+    }
+    try {
+      const store = getStore();
+      if (!store) return null;
+      const user =
+        store.getters['auth/getCurrentUser'] ||
+        store.getters.getCurrentUser;
+      return (user && user.access_token) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function getConversationStatus() {
+    try {
+      const store = getStore();
+      if (!store) return null;
+      const chat =
+        store.getters.getSelectedChat ||
+        store.getters['getSelectedChat'];
+      return chat ? chat.status : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /* ── API calls ───────────────────────────────────────────────────── */
+  async function fetchCurrentLabels(accountId, convId, token) {
+    const r = await fetch(
+      '/api/v1/accounts/' + accountId + '/conversations/' + convId,
+      { headers: { api_access_token: token } }
+    );
+    if (!r.ok) throw new Error('Falha ao buscar conversa: ' + r.status);
+    const data = await r.json();
+    return Array.isArray(data.labels) ? data.labels : [];
+  }
+
+  async function setLabels(accountId, convId, labels, token) {
+    const r = await fetch(
+      '/api/v1/accounts/' + accountId + '/conversations/' + convId + '/labels',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          api_access_token: token,
+        },
+        body: JSON.stringify({ labels: labels }),
+      }
+    );
+    if (!r.ok) throw new Error('Falha ao adicionar etiqueta: ' + r.status);
+    return r.json();
+  }
+
+  async function resolveConversation(accountId, convId, token) {
+    const r = await fetch(
+      '/api/v1/accounts/' + accountId + '/conversations/' + convId + '/toggle_status',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          api_access_token: token,
+        },
+        body: JSON.stringify({ status: 'resolved' }),
+      }
+    );
+    if (!r.ok) throw new Error('Falha ao resolver conversa: ' + r.status);
+    return r.json();
+  }
+
+  /* ── Ação principal ──────────────────────────────────────────────── */
+  async function resolveWithoutSurvey() {
+    const ctx = parseUrl();
+    if (!ctx) return;
+
+    const token = getToken();
+    if (!token) {
+      alert('Não foi possível obter o token de autenticação.');
+      return;
+    }
+
+    const btn = document.getElementById(BTN_ID);
+    if (btn) btn.classList.add('is-busy');
+
+    try {
+      /* 1. Buscar labels atuais da conversa */
+      const currentLabels = await fetchCurrentLabels(ctx.accountId, ctx.convId, token);
+
+      /* 2. Adicionar nao_enviar_pesquisa se ainda não tiver */
+      const merged = currentLabels.slice();
+      if (!merged.includes(LABEL_TAG)) {
+        merged.push(LABEL_TAG);
+      }
+      await setLabels(ctx.accountId, ctx.convId, merged, token);
+
+      /* 3. Resolver a conversa */
+      await resolveConversation(ctx.accountId, ctx.convId, token);
+
+      /* 4. Atualizar UI via Vuex store */
+      try {
+        const store = getStore();
+        if (store) {
+          store.dispatch('resolveConversation', { conversationId: Number(ctx.convId) });
+        }
+      } catch (_) {
+        /* fallback: recarregar para refletir mudança */
+        location.reload();
+      }
+    } catch (err) {
+      alert('Erro ao resolver sem pesquisa:\n' + err.message);
+    } finally {
+      if (btn) btn.classList.remove('is-busy');
+    }
+  }
+
+  /* ── Botão ───────────────────────────────────────────────────────── */
+  function removeBtn() {
+    const el = document.getElementById(BTN_ID);
+    if (el) el.remove();
+  }
+
+  function buildBtn() {
+    const mobile = isMobile();
+    const btn = document.createElement('button');
+    btn.id = BTN_ID;
+    btn.type = 'button';
+    btn.title = 'Adiciona a etiqueta "nao_enviar_pesquisa" e resolve a conversa (sem enviar CSAT)';
+
+    if (mobile) {
+      btn.classList.add('is-mobile');
+      btn.innerHTML =
+        ICON_MOBILE +
+        '<span class="rncsat-spinner"></span>';
+    } else {
+      btn.innerHTML =
+        ICON_DESKTOP +
+        '<span class="rncsat-spinner"></span>' +
+        '<span class="rncsat-label">Resolver sem pesquisa</span>';
+    }
+
+    btn.addEventListener('click', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      resolveWithoutSurvey();
+    });
+    return btn;
+  }
+
+  /* ── Encontrar a barra de ações (onde fica o botão "Resolver") ──── */
+  function findResolveBar() {
+    var bar = document.querySelector('.resolve-actions');
+    if (bar) return bar.closest('.actions--container') || bar.parentElement;
+    return null;
+  }
+
+  /* ── Injeção ─────────────────────────────────────────────────────── */
+  let activeConvId = null;
+
+  function inject() {
+    const ctx = parseUrl();
+
+    /* Remover botão se não estiver numa conversa ou conta não permitida */
+    if (!ctx || !isAllowedAccount(ctx.accountId)) {
+      removeBtn();
+      activeConvId = null;
+      return;
+    }
+
+    /* Só mostrar quando a conversa não está resolvida */
+    const status = getConversationStatus();
+    if (status === 'resolved') {
+      removeBtn();
+      return;
+    }
+
+    /* Evitar re-injeção na mesma conversa */
+    if (ctx.convId === activeConvId && document.getElementById(BTN_ID)) return;
+    activeConvId = ctx.convId;
+
+    removeBtn();
+
+    const bar = findResolveBar();
+    if (!bar) return;
+
+    const btn = buildBtn();
+    bar.parentElement.insertBefore(btn, bar);
+  }
+
+  /* ── Observador de mudanças na SPA ───────────────────────────────── */
+  let lastHref = location.href;
+
+  setInterval(function () {
+    if (location.href !== lastHref) {
+      lastHref = location.href;
+      activeConvId = null;
+      setTimeout(inject, 300);
+    }
+  }, 500);
+
+  const observer = new MutationObserver(function () {
+    inject();
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+
+  /* Injeção inicial (com atraso para a SPA renderizar) */
+  setTimeout(inject, 1000);
+})();
+</script>

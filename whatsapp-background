@@ -1,0 +1,105 @@
+<script>
+/* ==========================================================================
+   MEGA - WHATSAPP CHAT BACKGROUND
+   Aplica o fundo clássico do WhatsApp (verde musgo com doodle pattern SVG)
+   no painel de conversas. Funciona em modo claro e escuro.
+
+   Instalação: Super Admin → Dashboard Apps → adicione como Custom Script.
+   Configuração: para trocar a cor de fundo, edite as variáveis CSS
+   --wabg-light (modo claro) e --wabg-dark (modo escuro) no bloco de style.
+   ========================================================================== */
+(function () {
+  const STYLE_ID = 'whatsapp-bg-style';
+  if (document.getElementById(STYLE_ID)) return;
+
+  /* ── SVG doodle pattern (ícones estilizados semelhantes ao WhatsApp) ── */
+  const doodleSvg = `
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300" viewBox="0 0 300 300" opacity="0.08">
+  <!-- Relógio -->
+  <circle cx="30" cy="30" r="10" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <line x1="30" y1="30" x2="30" y2="23" stroke="currentColor" stroke-width="1.5"/>
+  <line x1="30" y1="30" x2="36" y2="30" stroke="currentColor" stroke-width="1.5"/>
+  <!-- Telefone -->
+  <rect x="95" y="18" rx="3" width="14" height="24" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <circle cx="102" cy="37" r="2" fill="currentColor"/>
+  <!-- Coração -->
+  <path d="M185 28c-3-8-14-8-14 2 0 6 14 16 14 16s14-10 14-16c0-10-11-10-14-2z" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <!-- Câmera -->
+  <rect x="245" y="22" rx="2" width="20" height="14" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <circle cx="255" cy="29" r="4" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <rect x="252" y="19" rx="1" width="8" height="4" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <!-- Nota musical -->
+  <circle cx="28" cy="105" r="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <line x1="33" y1="105" x2="33" y2="88" stroke="currentColor" stroke-width="1.5"/>
+  <path d="M33 88 Q40 85 40 92" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <!-- Balão de chat -->
+  <rect x="88" y="88" rx="6" width="26" height="18" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <path d="M94 106 L90 114 L100 106" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <!-- Emoji sorriso -->
+  <circle cx="185" cy="100" r="12" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <circle cx="180" cy="97" r="1.5" fill="currentColor"/>
+  <circle cx="190" cy="97" r="1.5" fill="currentColor"/>
+  <path d="M179 103 Q185 110 191 103" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <!-- Globo -->
+  <circle cx="260" cy="100" r="11" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <ellipse cx="260" cy="100" rx="5" ry="11" fill="none" stroke="currentColor" stroke-width="1"/>
+  <line x1="249" y1="100" x2="271" y2="100" stroke="currentColor" stroke-width="1"/>
+  <!-- Estrela -->
+  <polygon points="30,158 33,168 44,168 36,174 39,184 30,178 21,184 24,174 16,168 27,168" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <!-- Livro -->
+  <path d="M88 170 Q100 164 112 170 Q100 176 88 170 Z" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <line x1="100" y1="164" x2="100" y2="183" stroke="currentColor" stroke-width="1.5"/>
+  <path d="M88 170 L88 183 Q100 177 100 183" fill="none" stroke="currentColor" stroke-width="1"/>
+  <path d="M112 170 L112 183 Q100 177 100 183" fill="none" stroke="currentColor" stroke-width="1"/>
+  <!-- Envelope -->
+  <rect x="170" y="162" rx="2" width="26" height="18" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <polyline points="170,162 183,174 196,162" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <!-- Lâmpada -->
+  <circle cx="260" cy="168" r="9" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <line x1="255" y1="177" x2="265" y2="177" stroke="currentColor" stroke-width="1.5"/>
+  <line x1="256" y1="180" x2="264" y2="180" stroke="currentColor" stroke-width="1.5"/>
+  <!-- Raio -->
+  <polygon points="30,230 36,248 32,248 38,268 28,248 32,248 26,230" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <!-- Cadeado -->
+  <rect x="94" y="242" rx="2" width="16" height="14" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <path d="M97 242 V236 A5 5 0 0 1 107 236 V242" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <!-- Pin / Localização -->
+  <path d="M185 232 A8 8 0 1 1 185 248" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <path d="M185 248 A8 8 0 1 1 185 232" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <path d="M185 256 L185 248" fill="none" stroke="currentColor" stroke-width="0"/>
+  <circle cx="185" cy="240" r="3" fill="currentColor"/>
+  <path d="M185 258 Q185 248 177 240 A8 8 0 1 1 193 240 Q185 248 185 258Z" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <!-- Wi-fi -->
+  <circle cx="260" cy="258" r="2" fill="currentColor"/>
+  <path d="M250 244 Q260 236 270 244" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <path d="M253 249 Q260 243 267 249" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <path d="M256 254 Q260 250 264 254" fill="none" stroke="currentColor" stroke-width="1.5"/>
+</svg>`;
+
+  const encodedSvgLight = encodeURIComponent(
+    doodleSvg.replace(/currentColor/g, '#3B4A54')
+  );
+  const encodedSvgDark = encodeURIComponent(
+    doodleSvg.replace(/currentColor/g, '#8696A0')
+  );
+
+  const style = document.createElement('style');
+  style.id = STYLE_ID;
+  style.textContent = `
+    /* ---------- Light mode ---------- */
+    .conversation-panel {
+      background-color: #D6CFC5 !important;
+      background-image: url("data:image/svg+xml,${encodedSvgLight}") !important;
+      background-repeat: repeat !important;
+      background-size: 200px 200px !important;
+    }
+
+    /* ---------- Dark mode ---------- */
+    .dark .conversation-panel {
+      background-color: #0B141A !important;
+      background-image: url("data:image/svg+xml,${encodedSvgDark}") !important;
+    }
+  `;
+  document.head.appendChild(style);
+})();
+</script>
